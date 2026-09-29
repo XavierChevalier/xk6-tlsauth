@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -147,6 +148,9 @@ func (mi *ModuleInstance) Connect(url string, params map[string]any, setupFn fun
 
 	conn, httpResp, dialErr := dialer.DialContext(ctx, url, p.headers)
 	if dialErr != nil {
+		if errors.Is(dialErr, websocket.ErrBadHandshake) && httpResp != nil {
+			return nil, fmt.Errorf("%w: status %d", dialErr, httpResp.StatusCode)
+		}
 		return nil, dialErr
 	}
 
@@ -163,6 +167,7 @@ func (mi *ModuleInstance) Connect(url string, params map[string]any, setupFn fun
 		eventHandlers: make(map[string][]sobek.Callable),
 		done:          make(chan struct{}),
 	}
+	defer func() { _ = socket.closeConn(websocket.CloseGoingAway) }()
 
 	setupFn(socket)
 	socket.fire("open")

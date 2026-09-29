@@ -134,6 +134,42 @@ func TestConnectWithTLSAuth(t *testing.T) {
 	require.Empty(t, gotMsg)
 }
 
+func TestConnectPanicsInOpenHandlerClosesConnection(t *testing.T) {
+	t.Parallel()
+
+	wssURL, clientCertPEM, clientKeyPEM, _ := startMTLSWSSServer(t)
+	vu := testVU(t)
+	rt := vu.Runtime()
+	mi := New().NewModuleInstance(vu).(*ModuleInstance)
+
+	require.Panics(t, func() {
+		_, _ = mi.Connect(wssURL, map[string]any{
+			"tlsAuth": map[string]any{
+				"cert": string(clientCertPEM),
+				"key":  string(clientKeyPEM),
+			},
+		}, func(socket *Socket) {
+			socket.On("open", rt.ToValue(func(call sobek.FunctionCall) sobek.Value {
+				panic("open handler panic")
+			}))
+		})
+	})
+
+	res, err := mi.Connect(wssURL, map[string]any{
+		"tlsAuth": map[string]any{
+			"cert": string(clientCertPEM),
+			"key":  string(clientKeyPEM),
+		},
+	}, func(socket *Socket) {
+		socket.On("open", rt.ToValue(func(call sobek.FunctionCall) sobek.Value {
+			socket.Close()
+			return sobek.Undefined()
+		}))
+	})
+	require.NoError(t, err)
+	require.Equal(t, 101, res.Status)
+}
+
 func generateTLSCertificate(t *testing.T, host string, notBefore time.Time, validFor time.Duration) ([]byte, []byte) {
 	return generateTLSCertificateWithCA(t, host, notBefore, validFor, nil, nil)
 }

@@ -51,6 +51,8 @@ type requestParams struct {
 	tags    map[string]string
 }
 
+const defaultHTTPTimeout = 60 * time.Second
+
 var (
 	_ modules.Module   = &RootModule{}
 	_ modules.Instance = &ModuleInstance{}
@@ -96,7 +98,7 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 	})
 	export("post", func(call sobek.FunctionCall) sobek.Value {
 		url := call.Argument(0).String()
-		body := call.Argument(1).String()
+		body := jsBodyArg(call, 1)
 		params := jsParams(call, 2)
 		res, err := client.Post(url, body, params)
 		if err != nil {
@@ -107,7 +109,7 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 	export("request", func(call sobek.FunctionCall) sobek.Value {
 		method := call.Argument(0).String()
 		url := call.Argument(1).String()
-		body := call.Argument(2).String()
+		body := jsBodyArg(call, 2)
 		params := jsParams(call, 3)
 		res, err := client.Request(method, url, body, params)
 		if err != nil {
@@ -116,6 +118,13 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 		return rt.ToValue(res)
 	})
 	return modules.Exports{Default: obj}
+}
+
+func jsBodyArg(call sobek.FunctionCall, idx int) string {
+	if idx >= len(call.Arguments) || common.IsNullish(call.Argument(idx)) {
+		return ""
+	}
+	return call.Argument(idx).String()
 }
 
 func jsParams(call sobek.FunctionCall, idx int) map[string]any {
@@ -169,7 +178,7 @@ func (c *Client) Request(method, url, body string, params map[string]any) (*Resp
 		}
 	}
 
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: transport, Timeout: defaultHTTPTimeout}
 	if p.timeout > 0 {
 		client.Timeout = p.timeout
 	}
@@ -188,6 +197,9 @@ func (c *Client) Request(method, url, body string, params map[string]any) (*Resp
 
 	resp, doErr := client.Do(req)
 	if doErr != nil {
+		if state := c.vu.State(); state != nil && state.Options.Throw.Valid && state.Options.Throw.Bool {
+			return nil, doErr
+		}
 		return &Response{Status: 0, Error: doErr.Error()}, nil
 	}
 	defer resp.Body.Close()

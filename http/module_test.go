@@ -8,10 +8,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -171,6 +173,44 @@ func TestHTTPSwitchClientCertBetweenCalls(t *testing.T) {
 	require.Equal(t, "B", resB.Body)
 }
 
+func TestJSPostWithoutBodyOmitsUndefinedString(t *testing.T) {
+	t.Parallel()
+
+	var mu sync.Mutex
+	var sawBody []byte
+	srv := httptestPlainPOSTServer(t, &mu, &sawBody)
+
+	vu := testVU(t)
+	rt := vu.Runtime()
+	mi := New().NewModuleInstance(vu)
+	require.NoError(t, rt.Set("http", mi.Exports().Default))
+
+	_, err := rt.RunString(fmt.Sprintf(`http.post("%s")`, srv))
+	require.NoError(t, err)
+
+	mu.Lock()
+	body := append([]byte(nil), sawBody...)
+	mu.Unlock()
+	require.Empty(t, body)
+}
+
+func TestHTTPNetworkErrorRespectsThrowOption(t *testing.T) {
+	t.Parallel()
+
+	vu := testVU(t)
+	vu.State().Options.Throw = null.BoolFrom(true)
+	c := NewClient(vu)
+
+	_, err := c.Get("http://127.0.0.1:1", nil)
+	require.Error(t, err)
+
+	vu.State().Options.Throw = null.BoolFrom(false)
+	res, err := c.Get("http://127.0.0.1:1", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Error)
+	require.Equal(t, 0, res.Status)
+}
+
 func TestHTTPGetMissingTLSAuthFails(t *testing.T) {
 	t.Parallel()
 
@@ -181,6 +221,27 @@ func TestHTTPGetMissingTLSAuthFails(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 0, res.Status)
 	require.NotEmpty(t, res.Error)
+}
+
+func httptestPlainPOSTServer(t *testing.T, mu *sync.Mutex, sawBody *[]byte) string {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			data, _ := io.ReadAll(r.Body)
+			mu.Lock()
+			*sawBody = data
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+		}),
+	}
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(func() { _ = listener.Close() })
+
+	return "http://" + listener.Addr().String()
 }
 
 func generateTLSCertificate(t *testing.T, host string, notBefore time.Time, validFor time.Duration) ([]byte, []byte) {

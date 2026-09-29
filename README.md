@@ -60,7 +60,7 @@ const cert = open('client.crt');
 const key = open('client.key');
 
 export default function () {
-  const res = ws.connect(__ENV.URL, {
+  const res = ws.connect(__ENV.WSS_URL, {
     tlsAuth: { cert, key },
     tags: { name: 'mtls-ws' },
   }, function (socket) {
@@ -102,6 +102,13 @@ Parsing lives in `internal/tlsauth` (`Parse` for `{ cert, key, password? }`).
 - AIA fetching.
 
 Unknown param keys are ignored (minimal v1 behavior).
+
+## Known limitations
+
+- Each request opens a fresh TLS transport; there is no client certificate caching, so mTLS adds a full handshake per call.
+- HTTP/2 is not forced (`ForceAttemptHTTP2` is not set); behavior follows the default Go `http.Transport`.
+- WebSocket `tags` in connect params are accepted but not applied to built-in WS metrics (limited metrics vs stock `k6/ws`).
+- WebSocket dial does not yet mirror stock `k6/ws` `throw: false` handshake-error handling.
 
 ## Development
 
