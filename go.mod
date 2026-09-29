@@ -3,6 +3,8 @@ module github.com/XavierChevalier/xk6-tlsauth
 go 1.26.5
 
 require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/grafana/sobek v0.0.0-20260908083152-4698bc773ae7
 	github.com/stretchr/testify v1.12.1
 	go.k6.io/k6/v2 v2.3.0
 	gopkg.in/guregu/null.v3 v3.3.0
@@ -20,7 +22,6 @@ require (
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
 	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/grafana/sobek v0.0.0-20260908083152-4698bc773ae7 // indirect
 	github.com/grafana/sobek-webapi-encoding v0.1.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
