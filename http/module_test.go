@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -100,6 +101,74 @@ func TestHTTPGetWithTLSAuth(t *testing.T) {
 	require.Equal(t, 200, res.Status)
 	require.Equal(t, "ok", res.Body)
 	require.Empty(t, res.Error)
+}
+
+type countingDialer struct {
+	inner lib.DialContexter
+	n     *int
+	mu    *sync.Mutex
+}
+
+func (d *countingDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	d.mu.Lock()
+	*d.n++
+	d.mu.Unlock()
+	return d.inner.DialContext(ctx, network, addr)
+}
+
+func TestTransportPoolReusesDialForSameTLSAuth(t *testing.T) {
+	t.Parallel()
+
+	serverURL, clientCertPEM, clientKeyPEM := startMTLSServer(t)
+	vu := testVU(t)
+	var dials int
+	var dialMu sync.Mutex
+	vu.State().Dialer = &countingDialer{inner: vu.State().Dialer, n: &dials, mu: &dialMu}
+
+	c := NewClient(vu)
+	params := map[string]any{
+		"tlsAuth": map[string]any{
+			"cert": string(clientCertPEM),
+			"key":  string(clientKeyPEM),
+		},
+	}
+
+	res1, err := c.Get(serverURL, params)
+	require.NoError(t, err)
+	require.Equal(t, 200, res1.Status)
+
+	dialMu.Lock()
+	afterFirst := dials
+	dialMu.Unlock()
+	require.Equal(t, 1, afterFirst)
+	require.Equal(t, 1, c.pooledTransportCount())
+
+	res2, err := c.Get(serverURL, params)
+	require.NoError(t, err)
+	require.Equal(t, 200, res2.Status)
+
+	dialMu.Lock()
+	afterSecond := dials
+	dialMu.Unlock()
+	require.Equal(t, 1, afterSecond, "expected keep-alive reuse of pooled transport")
+	require.Equal(t, 1, c.pooledTransportCount())
+}
+
+func TestTransportPoolKeepsSeparateTransportsPerCert(t *testing.T) {
+	t.Parallel()
+
+	serverURL, certAPEM, keyAPEM, certBPEM, keyBPEM := startMTLSServerReportingClientCN(t)
+	c := NewClient(testVU(t))
+
+	_, err := c.Get(serverURL, map[string]any{
+		"tlsAuth": map[string]any{"cert": string(certAPEM), "key": string(keyAPEM)},
+	})
+	require.NoError(t, err)
+	_, err = c.Get(serverURL, map[string]any{
+		"tlsAuth": map[string]any{"cert": string(certBPEM), "key": string(keyBPEM)},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 2, c.pooledTransportCount())
 }
 
 func startMTLSServerReportingClientCN(t *testing.T) (url string, certAPEM, keyAPEM, certBPEM, keyBPEM []byte) {

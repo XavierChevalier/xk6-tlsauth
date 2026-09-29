@@ -105,10 +105,12 @@ Unknown param keys are ignored (minimal v1 behavior).
 
 ## Known limitations
 
-- Each request opens a fresh TLS transport; there is no client certificate caching, so mTLS adds a full handshake per call.
+- HTTP transports are pooled per VU by `tlsAuth` identity (cert/key/password hash), up to 16 entries, so repeated calls with the same client certificate reuse keep-alive connections. Switching among many distinct certificates still creates new transports (and handshakes) until older pool entries are evicted.
+- PEM parsing still runs once per new pool entry (not on every request once pooled).
 - HTTP/2 is not forced (`ForceAttemptHTTP2` is not set); behavior follows the default Go `http.Transport`.
 - WebSocket `tags` in connect params are accepted but not applied to built-in WS metrics (limited metrics vs stock `k6/ws`).
 - WebSocket dial does not yet mirror stock `k6/ws` `throw: false` handshake-error handling.
+- WebSocket connections are not pooled; each `connect` dials fresh.
 
 ## Development
 

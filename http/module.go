@@ -2,11 +2,14 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/grafana/sobek"
@@ -31,9 +34,15 @@ type ModuleInstance struct {
 	client *Client
 }
 
-// Client performs one-shot HTTP requests with per-request tlsAuth.
+// Client performs HTTP requests with per-request tlsAuth, pooling transports
+// by client-certificate identity so keep-alives can reuse TLS sessions.
 type Client struct {
 	vu modules.VU
+
+	mu       sync.Mutex
+	pool     map[string]*http.Transport
+	poolLRU  []string
+	maxPools int
 }
 
 // Response is returned to JS and Go callers.
@@ -51,7 +60,10 @@ type requestParams struct {
 	tags    map[string]string
 }
 
-const defaultHTTPTimeout = 60 * time.Second
+const (
+	defaultHTTPTimeout  = 60 * time.Second
+	defaultMaxTransport = 16
+)
 
 var (
 	_ modules.Module   = &RootModule{}
@@ -65,7 +77,11 @@ func New() *RootModule {
 
 // NewClient builds a client for the given VU (tests and internal use).
 func NewClient(vu modules.VU) *Client {
-	return &Client{vu: vu}
+	return &Client{
+		vu:       vu,
+		pool:     make(map[string]*http.Transport),
+		maxPools: defaultMaxTransport,
+	}
 }
 
 // NewModuleInstance implements modules.Module.
@@ -160,22 +176,9 @@ func (c *Client) Request(method, url, body string, params map[string]any) (*Resp
 		ctx = context.Background()
 	}
 
-	tlsConfig, err := c.buildTLSConfig(p.tlsAuth)
+	transport, err := c.transportFor(p.tlsAuth)
 	if err != nil {
 		return nil, err
-	}
-
-	transport := &http.Transport{
-		TLSClientConfig: tlsConfig,
-		Proxy:           http.ProxyFromEnvironment,
-	}
-	defer transport.CloseIdleConnections()
-	if state := c.vu.State(); state != nil {
-		if state.Dialer != nil {
-			transport.DialContext = state.Dialer.DialContext
-		} else if tr, ok := state.Transport.(*http.Transport); ok && tr.DialContext != nil {
-			transport.DialContext = tr.DialContext
-		}
 	}
 
 	client := &http.Client{Transport: transport, Timeout: defaultHTTPTimeout}
@@ -216,6 +219,94 @@ func (c *Client) Request(method, url, body string, params map[string]any) (*Resp
 	}
 	c.pushMetrics(ctx, p.tags, res.Status)
 	return res, nil
+}
+
+func (c *Client) pooledTransportCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.pool)
+}
+
+func (c *Client) transportFor(tlsAuthVal any) (*http.Transport, error) {
+	key, err := tlsAuthPoolKey(tlsAuthVal)
+	if err != nil {
+		return nil, err
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if tr, ok := c.pool[key]; ok {
+		c.touchLRULocked(key)
+		return tr, nil
+	}
+
+	tlsConfig, err := c.buildTLSConfig(tlsAuthVal)
+	if err != nil {
+		return nil, err
+	}
+
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+		Proxy:           http.ProxyFromEnvironment,
+	}
+	if state := c.vu.State(); state != nil {
+		if state.Dialer != nil {
+			transport.DialContext = state.Dialer.DialContext
+		} else if tr, ok := state.Transport.(*http.Transport); ok && tr.DialContext != nil {
+			transport.DialContext = tr.DialContext
+		}
+	}
+
+	c.evictIfNeededLocked()
+	c.pool[key] = transport
+	c.poolLRU = append(c.poolLRU, key)
+	return transport, nil
+}
+
+func (c *Client) touchLRULocked(key string) {
+	for i, k := range c.poolLRU {
+		if k == key {
+			c.poolLRU = append(append(c.poolLRU[:i], c.poolLRU[i+1:]...), key)
+			return
+		}
+	}
+	c.poolLRU = append(c.poolLRU, key)
+}
+
+func (c *Client) evictIfNeededLocked() {
+	max := c.maxPools
+	if max <= 0 {
+		max = defaultMaxTransport
+	}
+	for len(c.pool) >= max && len(c.poolLRU) > 0 {
+		oldest := c.poolLRU[0]
+		c.poolLRU = c.poolLRU[1:]
+		if tr, ok := c.pool[oldest]; ok {
+			tr.CloseIdleConnections()
+			delete(c.pool, oldest)
+		}
+	}
+}
+
+func tlsAuthPoolKey(v any) (string, error) {
+	if v == nil {
+		return "", nil
+	}
+	raw, ok := v.(map[string]any)
+	if !ok {
+		return "", fmt.Errorf("tlsAuth must be an object, got %T", v)
+	}
+	certStr, _ := raw["cert"].(string)
+	keyStr, _ := raw["key"].(string)
+	passwordStr, _ := raw["password"].(string)
+	sum := sha256.New()
+	_, _ = sum.Write([]byte(certStr))
+	_, _ = sum.Write([]byte{0})
+	_, _ = sum.Write([]byte(keyStr))
+	_, _ = sum.Write([]byte{0})
+	_, _ = sum.Write([]byte(passwordStr))
+	return hex.EncodeToString(sum.Sum(nil)), nil
 }
 
 func (c *Client) buildTLSConfig(tlsAuthVal any) (*tls.Config, error) {
