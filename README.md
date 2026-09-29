@@ -75,7 +75,7 @@ export default function () {
 
 Blocking connect model matches `k6/ws`, not `k6/websockets`.
 
-Run: `./k6 run examples/ws.js -e URL=wss://your-mtls-host/ws`
+Run: `./k6 run examples/ws.js -e WSS_URL=wss://your-mtls-host/ws`
 
 ### Shared `tlsAuth` object
 
