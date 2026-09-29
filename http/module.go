@@ -160,6 +160,7 @@ func (c *Client) Request(method, url, body string, params map[string]any) (*Resp
 		TLSClientConfig: tlsConfig,
 		Proxy:           http.ProxyFromEnvironment,
 	}
+	defer transport.CloseIdleConnections()
 	if state := c.vu.State(); state != nil {
 		if state.Dialer != nil {
 			transport.DialContext = state.Dialer.DialContext

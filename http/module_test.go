@@ -100,6 +100,77 @@ func TestHTTPGetWithTLSAuth(t *testing.T) {
 	require.Empty(t, res.Error)
 }
 
+func startMTLSServerReportingClientCN(t *testing.T) (url string, certAPEM, keyAPEM, certBPEM, keyBPEM []byte) {
+	t.Helper()
+
+	caCertPEM, caKeyPEM := generateTLSCertificate(t, "127.0.0.1", time.Now(), time.Hour)
+	caCertBlock, _ := pem.Decode(caCertPEM)
+	caCert, err := x509.ParseCertificate(caCertBlock.Bytes)
+	require.NoError(t, err)
+	caKeyBlock, _ := pem.Decode(caKeyPEM)
+	caKeyAny, err := x509.ParsePKCS8PrivateKey(caKeyBlock.Bytes)
+	require.NoError(t, err)
+	caKey := caKeyAny.(*rsa.PrivateKey)
+
+	srvCertPEM, srvKeyPEM := generateTLSCertificateWithCA(t, "127.0.0.1", time.Now(), time.Hour, caCert, caKey)
+	certAPEM, keyAPEM = generateClientCertWithCA(t, "A", time.Now(), time.Hour, caCert, caKey)
+	certBPEM, keyBPEM = generateClientCertWithCA(t, "B", time.Now(), time.Hour, caCert, caKey)
+
+	clientCAPool := x509.NewCertPool()
+	require.True(t, clientCAPool.AppendCertsFromPEM(caCertPEM))
+
+	serverCert, err := tls.X509KeyPair(srvCertPEM, srvKeyPEM)
+	require.NoError(t, err)
+
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    clientCAPool,
+	})
+	require.NoError(t, err)
+
+	srv := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cn := ""
+			if len(r.TLS.PeerCertificates) > 0 {
+				cn = r.TLS.PeerCertificates[0].Subject.CommonName
+			}
+			_, _ = fmt.Fprint(w, cn)
+		}),
+	}
+	go func() { _ = srv.Serve(listener) }()
+	t.Cleanup(func() { _ = listener.Close() })
+
+	return "https://" + listener.Addr().String(), certAPEM, keyAPEM, certBPEM, keyBPEM
+}
+
+func TestHTTPSwitchClientCertBetweenCalls(t *testing.T) {
+	t.Parallel()
+
+	serverURL, certAPEM, keyAPEM, certBPEM, keyBPEM := startMTLSServerReportingClientCN(t)
+	c := NewClient(testVU(t))
+
+	resA, err := c.Get(serverURL, map[string]any{
+		"tlsAuth": map[string]any{
+			"cert": string(certAPEM),
+			"key":  string(keyAPEM),
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 200, resA.Status)
+	require.Equal(t, "A", resA.Body)
+
+	resB, err := c.Get(serverURL, map[string]any{
+		"tlsAuth": map[string]any{
+			"cert": string(certBPEM),
+			"key":  string(keyBPEM),
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, 200, resB.Status)
+	require.Equal(t, "B", resB.Body)
+}
+
 func TestHTTPGetMissingTLSAuthFails(t *testing.T) {
 	t.Parallel()
 
@@ -154,6 +225,40 @@ func generateTLSCertificateWithCA(
 		template.KeyUsage |= x509.KeyUsageCertSign
 		parent = &template
 		ppriv = priv
+	}
+
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, parent, &priv.PublicKey, ppriv)
+	require.NoError(t, err)
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	require.NoError(t, err)
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes})
+	return certPEM, keyPEM
+}
+
+func generateClientCertWithCA(
+	t *testing.T, commonName string, notBefore time.Time, validFor time.Duration,
+	parent *x509.Certificate, ppriv *rsa.PrivateKey,
+) ([]byte, []byte) {
+	t.Helper()
+
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	notAfter := notBefore.Add(validFor)
+	serialNumber, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	require.NoError(t, err)
+
+	template := x509.Certificate{
+		SerialNumber:          serialNumber,
+		Subject:               pkix.Name{CommonName: commonName},
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		BasicConstraintsValid: true,
+		SignatureAlgorithm:    x509.SHA256WithRSA,
 	}
 
 	derBytes, err := x509.CreateCertificate(rand.Reader, &template, parent, &priv.PublicKey, ppriv)
