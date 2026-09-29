@@ -21,6 +21,7 @@ require (
 	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grafana/sobek v0.0.0-20260908083152-4698bc773ae7 // indirect
+	github.com/grafana/sobek-webapi-encoding v0.1.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
